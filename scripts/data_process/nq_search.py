@@ -23,7 +23,7 @@ from verl.utils.hdfs_io import copy, makedirs
 import argparse
 
 
-def make_prefix(dp):
+def make_prefix(dp, template_type='base'):
     question = dp['question']
 
     prefix = f"""Answer the given question. \
@@ -43,8 +43,9 @@ You need to tell whether there is a golden answer. If not, you need to correct t
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--local_dir', default='/mnt/GeneralModel/zhengxuhui/data/stepsearch')
+    parser.add_argument('--local_dir', default='./data/stepsearch')
     parser.add_argument('--hdfs_dir', default=None)
+    parser.add_argument('--template_type', type=str, default='base')
 
     args = parser.parse_args()
 
@@ -64,27 +65,19 @@ if __name__ == '__main__':
             if example['question'][-1] != '?':
                 example['question'] += '?'
             question = make_prefix(example, template_type=args.template_type)
-            solution = {
-                "target": example['golden_answers'],
-                "search_keys": []
-            }
+            solution = {"target": example['golden_answers'], "search_keys": []}
 
             data = {
                 "data_source": data_source,
-                "prompt": [{
-                    "role": "user",
-                    "content": question,
-                }],
+                "prompt": [
+                    {
+                        "role": "user",
+                        "content": question,
+                    }
+                ],
                 "ability": "fact-reasoning",
-                "reward_model": {
-                    "style": "rule",
-                    "ground_truth": solution
-                },
-                "extra_info": {
-                    'split': split,
-                    'index': idx,
-                    "support_docs": []
-                }
+                "reward_model": {"style": "rule", "ground_truth": solution},
+                "extra_info": {'split': split, 'index': idx, "support_docs": []},
             }
             return data
 
