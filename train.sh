@@ -77,5 +77,5 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     trainer.search_key_reward=true \
     max_turns=5 \
     retriever.url="http://127.0.0.1:8000/retrieve" \
-    retriever.topk=3 \
+    retriever.topk=5 \
     2>&1 | tee /mnt/GeneralModel/zhengxuhui/data/stepsearch/log/$EXPERIMENT_NAME.log

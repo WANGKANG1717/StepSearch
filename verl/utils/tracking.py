@@ -19,11 +19,10 @@ from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import List, Union, Dict, Any
-import os
 
 
 class Tracking(object):
-    supported_backend = ['wandb', 'mlflow', 'console', 'swanlab']
+    supported_backend = ['wandb', 'mlflow', 'console']
 
     def __init__(self, project_name, experiment_name, default_backend: Union[str, List[str]] = 'console', config=None):
         if isinstance(default_backend, str):
@@ -39,37 +38,24 @@ class Tracking(object):
 
         if 'tracking' in default_backend or 'wandb' in default_backend:
             import wandb
-            
+            import os
             WANDB_API_KEY = os.environ.get("WANDB_API_KEY", None)
             if WANDB_API_KEY:
                 wandb.login(key=WANDB_API_KEY)
-            wandb.init(project=project_name, 
-                       name=experiment_name, 
-                       config=config, 
-                       settings=wandb.Settings(x_disable_stats=True))
+            # 支持从checkpoint恢复wandb运行
+            WANDB_RUN_ID = os.environ.get("WANDB_RUN_ID", None)
+            init_kwargs = {"project": project_name, "name": experiment_name, "config": config}
+            if WANDB_RUN_ID:
+                init_kwargs["id"] = WANDB_RUN_ID
+                init_kwargs["resume"] = "must"  # 必须恢复指定的run
+            wandb.init(**init_kwargs)
             self.logger['wandb'] = wandb
 
-        if "mlflow" in default_backend:
+        if 'mlflow' in default_backend:
             import mlflow
-
-            MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", None)
-            if MLFLOW_TRACKING_URI:
-                mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-
-            # Project_name is actually experiment_name in MLFlow
-            # If experiment does not exist, will create a new experiment
-            experiment = mlflow.set_experiment(project_name)
-            mlflow.start_run(experiment_id=experiment.experiment_id, run_name=experiment_name)
+            mlflow.start_run(run_name=experiment_name)
             mlflow.log_params(_compute_mlflow_params_from_objects(config))
-            self.logger["mlflow"] = _MlflowLoggingAdapter()
-
-        if 'swanlab' in default_backend:
-            import swanlab
-            SWANLAB_API_KEY = os.environ.get("SWANLAB_API_KEY", None)
-            if SWANLAB_API_KEY:
-                swanlab.login(api_key=SWANLAB_API_KEY, save=True)
-            swanlab.init(project=project_name, experiment_name=experiment_name)
-            self.logger['swanlab'] = swanlab
+            self.logger['mlflow'] = _MlflowLoggingAdapter()
 
         if 'console' in default_backend:
             from verl.utils.logger.aggregate_logger import LocalLogger

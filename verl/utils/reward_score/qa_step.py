@@ -23,27 +23,29 @@ def normalize_answer(s):
 
     return white_space_fix(remove_articles(remove_punc(lower(s))))
 
+
 def extract_solution(solution_str):
     """Extract the equation from the solution string."""
 
     answer_pattern = r'<answer>(.*?)</answer>'
     match = re.finditer(answer_pattern, solution_str, re.DOTALL)
     matches = list(match)
-    
+
     # If there are 0 or exactly 1 matches, return None
     if len(matches) < 1:
         return None
-    
+
     # If there are 2 or more matches, return the last one
     return matches[-1].group(1).strip()
-    
+
+
 def extract_titles_from_information(information):
     """
     Extract all text between <## and ##> tags from the information string.
-    
+
     Args:
         information: String containing text with <## text ##> tags
-        
+
     Returns:
         List of extracted texts between tags
     """
@@ -51,13 +53,14 @@ def extract_titles_from_information(information):
     matches = re.findall(pattern, information)
     return [match.replace('Title:', '').strip() for match in matches]
 
+
 def extract_content_from_information(information):
     """
     Extract the content after each <## text ##> tag from the information string.
-    
+
     Args:
         information: String containing text with <## text ##> tags
-        
+
     Returns:
         List of String after each <## text ##> tag
     """
@@ -98,15 +101,16 @@ def query_f1_score(prediction, golden_answers):
             current_f1 = 0.0
         else:
             current_f1 = 2 * (precision * recall) / (precision + recall)
-        
+
         max_f1 = max(max_f1, current_f1)
 
-    return round(max_f1, 4) 
+    return round(max_f1, 4)
 
-def step_information_gain(informations:list[list[str]], golden_info:list[dict])->list[float]:
+
+def step_information_gain(informations: list[list[str]], golden_info: list[dict]) -> list[float]:
     """
     Calculate the information gain for each information in the list.
-    
+
     Args:
         informations: List of list of String
         golden_info: List of dicts with keys 'title' and 'paragraph_text'
@@ -133,43 +137,41 @@ def step_information_gain(informations:list[list[str]], golden_info:list[dict])-
             for i, score in enumerate(subm_tfidf_cosine(input_str=info, concept_units=golden_infos)):
                 current_match_degree[i] = max(current_match_degree[i], score)
 
-        information_gains.append(
-            sum(max(current_match_degree[i] - previous_match_degree[i], 0) for i in range(len(current_match_degree)))
-            / len(current_match_degree)
-            )
+        information_gains.append(sum(max(current_match_degree[i] - previous_match_degree[i], 0) for i in range(len(current_match_degree))) / len(current_match_degree))
 
         previous_match_degree = [max(current_match_degree[i], previous_match_degree[i]) for i in range(len(current_match_degree))]
-    
+
     redundancy_penalty = [0.0 for _ in information_gains]
     info_gotten = set()
     for i, information in enumerate(informations):
         for info in information:
             if info in info_gotten:
-                redundancy_penalty[i] += 1/len(information)
+                redundancy_penalty[i] += 1 / len(information)
             else:
                 info_gotten.add(info)
-    
-    
+
     return information_gains, redundancy_penalty
+
 
 def answer_last_check(text: str):
     # 匹配 answer 区块，非贪婪模式，支持跨行
     pattern = re.compile(r'<answer>.*?</answer>', re.DOTALL)
     matches = list(pattern.finditer(text))
-    
+
     if not matches:
         # 未找到任何 <answer>...</answer>
         return False
-    
+
     # 取最后一个 match
     last_match = matches[-1]
     start, end = last_match.span()
-    
+
     # 区块之后的文本
     trailing_text = text[end:]
     # 判断去除所有空白字符后是否还有内容
-    if len(trailing_text.strip()) > 0: return False
-    
+    if len(trailing_text.strip()) > 0:
+        return False
+
     return True
 
 
@@ -183,20 +185,20 @@ def step_search_keys_match(searches, keys):
     Returns:
         float: Score between 0 and 1 indicating match quality
     """
-    
+
     keys = [list(arr) for arr in keys]
     if not searches or not keys:
         return 0.0
-        
+
     # Track which key groups have been matched
-    matched_key_groups = {i:0 for i in range(len(keys))}
+    matched_key_groups = {i: 0 for i in range(len(keys))}
     total_matches = 0
-    
+
     # Process each search query
     for search in searches:
         best_match_score = 0
         best_match_group = -1
-        
+
         # Compare against each key group
         for group_idx, key_group in enumerate(keys):
             match_score = query_f1_score(prediction=search, golden_answers=key_group)
@@ -206,14 +208,69 @@ def step_search_keys_match(searches, keys):
             if match_score > best_match_score:
                 best_match_score = match_score
                 best_match_group = group_idx
-        
+
         # Update the matched key groups
         matched_key_groups[best_match_group] = best_match_score
 
     total_matches = sum(matched_key_groups.values())
-                
+
     # Return proportion of key groups that were matched
     return total_matches / len(keys)
+
+
+def get_format_reward(solution_str):
+    import re
+    
+    # 检查各种标签的数量
+    think_pattern = r'<think>.*?</think>'
+    search_pattern = r'<search>.*?</search>'
+    info_pattern = r'<information>.*?</information>'
+    answer_pattern = r'<answer>.*?</answer>'
+    
+    think_matches = re.findall(think_pattern, solution_str, re.DOTALL)
+    search_matches = re.findall(search_pattern, solution_str, re.DOTALL)
+    info_matches = re.findall(info_pattern, solution_str, re.DOTALL)
+    answer_matches = re.findall(answer_pattern, solution_str, re.DOTALL)
+    
+    score = 0.0
+    
+    # 基础格式奖励
+    if len(think_matches) > 0:
+        score += 0.1  # 存在think标签奖励
+    if len(search_matches) > 0:
+        score += 0.1  # 存在search标签奖励
+    if len(info_matches) > 0:
+        score += 0.1  # 存在information标签奖励
+    if len(answer_matches) > 0:
+        score += 0.2  # 存在answer标签奖励
+    
+    # 检查格式错误并惩罚
+    # 检查是否有未闭合的标签
+    unclosed_patterns = [
+        r'<think>(?:(?!<\/think>).)*$',
+        r'<search>(?:(?!<\/search>).)*$',
+        r'<information>(?:(?!<\/information>).)*$',
+        r'<answer>(?:(?!<\/answer>).)*$'
+    ]
+    
+    for pattern in unclosed_patterns:
+        if re.search(pattern, solution_str, re.DOTALL):
+            score -= 0.2  # 未闭合标签惩罚
+    
+    # 检查是否有不匹配的标签
+    all_tags = re.findall(r'<\/?(?:think|search|information|answer)>', solution_str)
+    tag_stack = []
+    for tag in all_tags:
+        if tag.startswith('</'):
+            if not tag_stack or tag.replace('</', '<') != tag_stack[-1]:
+                score -= 0.3  # 标签不匹配惩罚
+            elif tag_stack:
+                tag_stack.pop()
+        elif tag.endswith('>'):
+            tag_stack.append(tag)
+    
+    # 确保分数在合理范围内
+    return max(0.0, min(score, 0.1))
 
 def compute_score_f1_steps_plan_with_support_docs(config, solution_str, ground_truth, method='strict', support_docs=None, format_score=0.0, search_keys_score=0.618):
     # Find <information> content that follows each <search> tag
@@ -223,16 +280,19 @@ def compute_score_f1_steps_plan_with_support_docs(config, solution_str, ground_t
 
     answer_correct = query_f1_score(prediction=answer, golden_answers=ground_truth['target'])
 
-    if answer_last_check(solution_str):
+    if answer_last_check(solution_str):  # 如果模型给出答案
         final_score += answer_correct
-    else:
+    else:  # 模型没有给出答案
         return {
             'score': -1,
             'answer_correct': answer_correct,
             'step_scores': [],
             'search_key_score': 0.0,
         }
-                
+
+    # 格式奖励
+    format_reward = get_format_reward(solution_str)
+    final_score += format_reward
 
     information_matches = re.finditer(r'<search>.*?</search>\s*<information>(.*?)</information>', solution_str, re.DOTALL)
     information_matches = [
@@ -242,20 +302,21 @@ def compute_score_f1_steps_plan_with_support_docs(config, solution_str, ground_t
     ]
 
     information_gains, redundancy_penalty = step_information_gain(informations=information_matches, golden_info=support_docs)
-    step_scores = [(gain if config.trainer.information_gain and config.trainer.search_steps_reward else 0.0) - (penalty if config.trainer.redundancy_penalty and config.trainer.search_steps_reward else 0.0) for gain, penalty in zip(information_gains, redundancy_penalty)]
+    step_scores = [
+        (gain if config.trainer.information_gain and config.trainer.search_steps_reward else 0.0) - (penalty if config.trainer.redundancy_penalty and config.trainer.search_steps_reward else 0.0)
+        for gain, penalty in zip(information_gains, redundancy_penalty)
+    ]
 
+    # searches = [re.sub(r'</?search>', '', match).strip() for match in re.findall(r'<search>.*?</search>', solution_str, re.DOTALL)]
 
-    searches = [re.sub(r'</?search>', '', match).strip() for match in re.findall(r'<search>.*?</search>', solution_str, re.DOTALL)]
+    # search_key_score = 0.0
+    # if 'search_keys' in ground_truth:
+    #     search_key_score = step_search_keys_match(searches=searches, keys=ground_truth['search_keys'])
 
-    search_key_score = 0.0
-    if 'search_keys' in ground_truth:
-        search_key_score = step_search_keys_match(searches=searches, keys=ground_truth['search_keys'])
+    # if config.trainer.search_key_reward:
+    #     final_score += search_key_score * search_keys_score
 
     do_print = random.randint(1, 64) == 1
-
-    if config.trainer.search_key_reward:
-        final_score += search_key_score * search_keys_score
-
     if do_print:
         print(f"----------------rm_f1_steps_plan_with_support_docs----------------")
         print(f"Solution string: {solution_str}")
@@ -265,8 +326,9 @@ def compute_score_f1_steps_plan_with_support_docs(config, solution_str, ground_t
         print(f"Information gains: {information_gains}")
         print(f"Redundancy penalty: {redundancy_penalty}")
         print(f"Step scores: {step_scores}")
-        print(f"Search key score: {search_key_score}")
+        # print(f"Search key score: {search_key_score}")
 
+    search_key_score = 0
     return {
         'score': final_score,
         'answer_correct': answer_correct,
