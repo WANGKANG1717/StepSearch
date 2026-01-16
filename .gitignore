@@ -102,6 +102,6 @@ ENV/
 # Rope project settings
 .ropeproject
 *.json
-
+verl_checkpoints/
 
 

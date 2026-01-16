@@ -15,8 +15,9 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
-
+from tqdm import tqdm
 import os
+import sys
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -470,7 +471,12 @@ class RayPPOTrainer(object):
         The training loop of PPO with global metric computation.
         Accumulates metrics across all batches before computing final statistics.
         """
+        # 如果配置了跳过验证，快速返回空指标
+        if self.config.trainer.get('skip_validation', False):
+            return {}
+        
         import torch
+        import time
         reward_tensor_lst = []
         data_source_lst = []
         answer_correct_lst = []
@@ -495,12 +501,18 @@ class RayPPOTrainer(object):
             is_validation = True,
         )
 
+        # 添加验证进度条
+        total_val_batches = len(self.val_dataloader)
+        val_pbar = tqdm(total=total_val_batches, desc="Validation", unit="batch", 
+                       file=sys.stderr, leave=False, mininterval=1.0)
+
         if not self.config.do_search:
-            for test_data in self.val_dataloader:
+            for batch_idx, test_data in enumerate(self.val_dataloader):
                 test_batch = DataProto.from_single_dict(test_data)
 
                 # we only do validation on rule-based rm
                 if self.config.reward_model.enable and test_batch[0].non_tensor_batch['reward_model']['style'] == 'model':
+                    val_pbar.close()
                     return {}
 
                 test_gen_batch = test_batch.pop(['input_ids', 'attention_mask', 'position_ids'])
@@ -517,7 +529,6 @@ class RayPPOTrainer(object):
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
                 # unpad
                 test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
-                print('validation generation end')
 
                 test_batch = test_batch.union(test_output_gen_batch)
 
@@ -528,9 +539,13 @@ class RayPPOTrainer(object):
                 reward_tensor_lst.append(reward_tensor)
                 data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
                 answer_correct_lst.extend(answer_correct)
+                
+                # 更新进度条
+                val_pbar.update(1)
+                val_pbar.set_postfix({"Processed": f"{batch_idx+1}/{total_val_batches}"})
         else:
             predictions = []
-            for batch_dict in self.val_dataloader:
+            for batch_idx, batch_dict in enumerate(self.val_dataloader):
                 timing_raw = {}
                 test_batch: DataProto = DataProto.from_single_dict(batch_dict)
                 # test_batch = test_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
@@ -564,31 +579,53 @@ class RayPPOTrainer(object):
                     reward_tensor_lst.append(reward_tensor)
                     data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
                     answer_correct_lst.extend(answer_correct)
-                for i in range(len(test_batch)):
+                
+                # 批量处理预测，避免逐样本循环
+                batch_size = len(test_batch)
+                batch_prompts = []
+                batch_responses = []
+                batch_ids = []
+                batch_data_sources = []
+                batch_ground_truths = []
+                
+                for i in range(batch_size):
                     data_item = test_batch[i]
                     prompt_ids = data_item.batch['prompts']
-
                     prompt_length = prompt_ids.shape[-1]
-
                     valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
                     valid_prompt_ids = prompt_ids[-valid_prompt_length:]
-
+                    
                     response_ids = data_item.batch['responses']
                     valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
                     valid_response_ids = response_ids[:valid_response_length]
-
-                    # decode
-                    response_str = self.tokenizer.decode(valid_response_ids)
-                    ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']['target']
                     
+                    batch_prompts.append(valid_prompt_ids)
+                    batch_responses.append(valid_response_ids)
+                    batch_ids.append(data_item.non_tensor_batch['id'])
+                    batch_data_sources.append(data_item.non_tensor_batch['data_source'])
+                    ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']['target']
+                    batch_ground_truths.append(ground_truth if type(ground_truth) == str else list(ground_truth))
+                
+                # 批量解码（如果可能，可以进一步优化）
+                for i in range(batch_size):
                     prediction = {
-                        'id': data_item.non_tensor_batch['id'],
-                        'data_source': data_item.non_tensor_batch['data_source'],
-                        'prompt': self.tokenizer.decode(valid_prompt_ids),
-                        'response': response_str, 
-                        'ground_truth':  ground_truth if type(ground_truth) == str else list(ground_truth)
+                        'id': batch_ids[i],
+                        'data_source': batch_data_sources[i],
+                        'prompt': self.tokenizer.decode(batch_prompts[i]),
+                        'response': self.tokenizer.decode(batch_responses[i]), 
+                        'ground_truth': batch_ground_truths[i]
                     }
                     predictions.append(prediction)
+                
+                # 更新进度条
+                val_pbar.update(1)
+                val_pbar.set_postfix({
+                    "Processed": f"{batch_idx+1}/{total_val_batches}",
+                    "Predictions": len(predictions)
+                })
+        
+        # 关闭验证进度条
+        val_pbar.close()
         
         if self.config.trainer.save_predictions:
             # Create timestamp for unique filename
@@ -606,19 +643,24 @@ class RayPPOTrainer(object):
                 
             print(f'Saved predictions to {output_file}')
 
+        # 检查是否有数据被处理
+        if len(reward_tensor_lst) == 0 or len(answer_correct_lst) == 0:
+            print(f"Warning: No validation data processed. reward_tensor_lst: {len(reward_tensor_lst)}, answer_correct_lst: {len(answer_correct_lst)}")
+            return {}
+        
         reward_tensor = torch.cat([rw.sum(-1) for rw in reward_tensor_lst], dim=0).cpu()  # (batch_size,)
         # reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
         data_sources = np.concatenate(data_source_lst, axis=0)
+        
+        # 检查数据长度是否匹配
+        if len(data_sources) != len(answer_correct_lst):
+            print(f"Warning: Data length mismatch. data_sources: {len(data_sources)}, answer_correct_lst: {len(answer_correct_lst)}")
+            # 取较小的长度，避免索引越界
+            min_len = min(len(data_sources), len(answer_correct_lst))
+            data_sources = data_sources[:min_len]
+            answer_correct_lst = answer_correct_lst[:min_len]
+        
         # evaluate test_score based on data source
-        # data_source_reward = {}
-        # for i in range(reward_tensor.shape[0]):
-        #     data_source = data_sources[i]
-            # if data_source not in data_source_reward:
-            #     data_source_reward[data_source] = []
-        #     data_source_reward[data_source].append(answer_correct[i])
-        # metric_dict = {}
-        # for data_source, rewards in data_source_reward.items():
-        #     metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
         data_source_score = {}
         for i, correct in enumerate(answer_correct_lst):
             data_source = data_sources[i]
@@ -627,11 +669,20 @@ class RayPPOTrainer(object):
             data_source_score[data_source].append(correct)
 
         metric_dict = {}
-
-        for data_source, rewards in data_source_score.items():  #评测指标从reward换成correct
-        # for data_source, correct in data_source_score.items():
-            metric_dict[f'val/test_score/{data_source}'] = np.mean(correct)
-
+        
+        # 计算每个数据源的平均正确率
+        for data_source, correct_list in data_source_score.items():
+            if len(correct_list) > 0:
+                metric_dict[f'val/test_score/{data_source}'] = np.mean(correct_list)
+                # 添加调试信息
+                print(f"Validation - {data_source}: {len(correct_list)} samples, avg score: {np.mean(correct_list):.4f}, correct count: {sum(correct_list)}")
+            else:
+                print(f"Warning: {data_source} has no samples")
+        
+        # 如果没有计算任何指标，返回空字典
+        if len(metric_dict) == 0:
+            print("Warning: No validation metrics computed. Check if validation data was processed correctly.")
+        
         return metric_dict
 
 
@@ -709,15 +760,72 @@ class RayPPOTrainer(object):
         self.actor_rollout_wg.init_model()
 
     def _save_checkpoint(self):
-        actor_local_path = os.path.join(self.config.trainer.default_local_dir, 'actor',
-                                        f'global_step_{self.global_steps}')
+        import glob
+        import os
+        import shutil
+        from pathlib import Path
+        
+        # 从配置中获取最大检查点数量，默认为4
+        max_checkpoints = self.config.trainer.get('max_checkpoints_to_keep', 4)
+        
+        # 检查并清理旧的检查点
+        def manage_checkpoints(checkpoint_dir, checkpoint_pattern):
+            """在保存新检查点之前，清理旧检查点以保持数量不超过限制"""
+            if not os.path.exists(checkpoint_dir):
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                return
+            
+            # 获取所有匹配的检查点目录（只匹配目录，不匹配文件）
+            checkpoints = [
+                ckpt for ckpt in glob.glob(os.path.join(checkpoint_dir, checkpoint_pattern))
+                if os.path.isdir(ckpt)
+            ]
+            
+            # 如果保存新检查点后会超过限制，需要删除最旧的
+            # 例如：已有4个检查点，max_checkpoints=4，保存新检查点后会变成5个，需要删除1个
+            if len(checkpoints) >= max_checkpoints:
+                # 提取步数并排序
+                checkpoint_steps = []
+                for ckpt in checkpoints:
+                    try:
+                        # 从目录名中提取步数值，例如从 '/path/to/actor/global_step_100' 中提取 100
+                        # 使用 name 而不是 stem，因为这是目录路径
+                        dir_name = os.path.basename(ckpt)  # 获取 'global_step_100'
+                        step_str = dir_name.split('_')[-1]  # 提取 '100'
+                        step = int(step_str)
+                        checkpoint_steps.append((step, ckpt))
+                    except (ValueError, IndexError) as e:
+                        # 如果无法解析步数，跳过这个检查点（可能是其他格式的目录）
+                        continue
+                
+                # 按步数升序排序
+                checkpoint_steps.sort(key=lambda x: x[0])
+                
+                # 计算需要删除的数量：如果已有N个检查点，保存后会变成N+1个
+                # 需要删除 (N+1) - max_checkpoints 个最旧的检查点
+                num_to_delete = len(checkpoint_steps) + 1 - max_checkpoints
+                if num_to_delete > 0:
+                    for i in range(num_to_delete):
+                        oldest_checkpoint = checkpoint_steps[i][1]
+                        if os.path.exists(oldest_checkpoint):
+                            shutil.rmtree(oldest_checkpoint)
+                            print(f"Deleted oldest checkpoint: {oldest_checkpoint} (step {checkpoint_steps[i][0]})")
+
+        # 管理 actor 检查点（在保存之前清理）
+        actor_checkpoint_dir = os.path.join(self.config.trainer.default_local_dir, 'actor')
+        manage_checkpoints(actor_checkpoint_dir, 'global_step_*')
+        
+        actor_local_path = os.path.join(actor_checkpoint_dir, f'global_step_{self.global_steps}')
         actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
             self.config.trainer.default_hdfs_dir, 'actor')
         self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path)
 
         if self.use_critic:
-            critic_local_path = os.path.join(self.config.trainer.default_local_dir, 'critic',
-                                             f'global_step_{self.global_steps}')
+            # 管理 critic 检查点（在保存之前清理）
+            critic_checkpoint_dir = os.path.join(self.config.trainer.default_local_dir, 'critic')
+            manage_checkpoints(critic_checkpoint_dir, 'global_step_*')
+            
+            critic_local_path = os.path.join(critic_checkpoint_dir, f'global_step_{self.global_steps}')
             critic_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
                 self.config.trainer.default_hdfs_dir, 'critic')
             self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
@@ -747,7 +855,20 @@ class RayPPOTrainer(object):
         """
 
         logger = self.logger
-        self.global_steps = 0
+                
+        # 从checkpoint路径中提取步数，用于恢复训练
+        import re
+        model_path = self.config.actor_rollout_ref.model.path
+        step_match = re.search(r'global_step_(\d+)', model_path)
+        if step_match:
+            self.global_steps = int(step_match.group(1))
+            print(f'Resuming training from checkpoint at step {self.global_steps}')
+        else:
+            self.global_steps = 0
+        
+        import time
+        print("=" * 50 +"_validate start")
+        time_start = time.time()
         # perform validation before training
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
@@ -756,9 +877,14 @@ class RayPPOTrainer(object):
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get('val_only', False):
                 return
-
+        time_end = time.time()
+        print("=" * 50 +"_validate end -> cost time:", time_end - time_start)
         # we start from step 1
-        self.global_steps += 1
+        
+        # 如果从checkpoint恢复，不需要+1，因为checkpoint保存的是已经完成的步数
+        # 如果从0开始，则从step 1开始
+        if self.global_steps == 0:
+            self.global_steps += 1
 
         # Agent config preparation
         gen_config = GenerationConfig(
@@ -780,9 +906,38 @@ class RayPPOTrainer(object):
         )
 
         # start training loop
+        # 使用 total_training_steps 作为进度条总步数，确保与实际训练步数一致
+        # 在 Ray 环境中，将进度条输出重定向到 stderr，避免与 worker 进程的 stdout 输出冲突
+        print("=" * 50 + "1")
+        import sys
+        pbar = tqdm(
+            total=self.total_training_steps, 
+            initial=self.global_steps,  # 设置初始值，因为 global_steps 已经从 1 开始
+            desc="Training Progress", 
+            unit="step",
+            mininterval=1.0,  # 至少1秒更新一次
+            maxinterval=5.0,  # 最多5秒更新一次
+            dynamic_ncols=True,  # 动态调整宽度
+            disable=False,  # 确保进度条启用
+            file=sys.stderr,  # 输出到 stderr，避免与 Ray worker 的 stdout 冲突
+            leave=True  # 训练结束后保留进度条
+        )
+        print("=" * 50 + "2")
         for epoch in range(self.config.trainer.total_epochs):
+            print("=" * 50 + "3")
+            # 不使用嵌套的 epoch_pbar，避免干扰主进度条显示
             for batch_dict in self.train_dataloader:
-                print(f'epoch {epoch}, step {self.global_steps}')
+                print("=" * 50 + "4")
+                # 更新主进度条信息
+                pbar.set_description(f"Training Progress (Epoch {epoch+1}/{self.config.trainer.total_epochs})")
+                pbar.set_postfix({
+                    "Step": f"{self.global_steps}/{self.total_training_steps}",
+                    "Epoch": f"{epoch+1}/{self.config.trainer.total_epochs}"
+                })
+                
+                # 每10步打印一次详细信息，使用 tqdm.write() 避免干扰进度条
+                if self.global_steps % 10 == 0 or self.global_steps == 1:
+                    pbar.write(f'[Epoch {epoch+1}/{self.config.trainer.total_epochs}] Step {self.global_steps}/{self.total_training_steps}')
                 metrics = {}
                 timing_raw = {}
 
@@ -916,7 +1071,8 @@ class RayPPOTrainer(object):
                         self.global_steps % self.config.trainer.test_freq == 0:
                         with _timer('testing', timing_raw):
                             val_metrics: dict = self._validate()
-                            print(f"Validation metrics: {val_metrics}")
+                            # 使用 tqdm.write() 避免干扰进度条显示
+                            pbar.write(f"Validation metrics: {val_metrics}")
                         metrics.update(val_metrics)
 
                     if self.config.trainer.save_freq > 0 and \
@@ -931,17 +1087,24 @@ class RayPPOTrainer(object):
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                # 更新进度条（在步数增加之前更新，这样显示更准确）
                 self.global_steps += 1
+                pbar.update(1)
+                pbar.refresh()  # 强制刷新进度条显示
 
                 if self.global_steps >= self.total_training_steps:
-
+                    # 关闭进度条
+                    pbar.close()
+                    
                     # perform validation after training
-                    if self.val_reward_fn is not None:
+                    if self.val_reward_fn is not None and not self.config.trainer.get('skip_validation', False):
                         val_metrics = self._validate()
                         pprint(f'Final validation metrics: {val_metrics}')
                         logger.log(data=val_metrics, step=self.global_steps)
                     return
-    
+        
+        # 关闭主进度条
+        pbar.close()
     def _create_loss_mask(self, batch, metrics):
         """Create loss mask for state tokens."""
         response_length = batch.batch['responses'].shape[-1]

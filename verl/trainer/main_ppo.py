@@ -100,12 +100,13 @@ class RewardManager():
             
             # all_scores.append(score)
 
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
-
-            if already_print_data_sources[data_source] < self.num_examine:
-                already_print_data_sources[data_source] += 1
-                print(sequences_str)
+            # 禁用模型输出打印，避免控制台输出过多内容
+            # if data_source not in already_print_data_sources:
+            #     already_print_data_sources[data_source] = 0
+            # 
+            # if already_print_data_sources[data_source] < self.num_examine:
+            #     already_print_data_sources[data_source] += 1
+            #     print(sequences_str)
         
         # print(f"[DEBUG] all_scores: {all_scores}")
         # print(f"[DEBUG] all_scores shape: {np.array(all_scores).shape}")

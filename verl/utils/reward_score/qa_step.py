@@ -74,6 +74,7 @@ def query_f1_score(prediction, golden_answers):
         return text.split()
 
     if prediction is None:
+        print("warning: prediction is None!")
         return 0.0
     prediction = normalize_answer(prediction)
     pred_tokens = prediction.split()
@@ -316,17 +317,17 @@ def compute_score_f1_steps_plan_with_support_docs(config, solution_str, ground_t
     # if config.trainer.search_key_reward:
     #     final_score += search_key_score * search_keys_score
 
-    do_print = random.randint(1, 64) == 1
-    if do_print:
-        print(f"----------------rm_f1_steps_plan_with_support_docs----------------")
-        print(f"Solution string: {solution_str}")
-        print(f"Golden answers: {ground_truth['target']}")
-        print(f"Extracted answer: {answer}")
-        print(f"Answer correct(f1): {answer_correct}")
-        print(f"Information gains: {information_gains}")
-        print(f"Redundancy penalty: {redundancy_penalty}")
-        print(f"Step scores: {step_scores}")
-        # print(f"Search key score: {search_key_score}")
+    # do_print = random.randint(1, 10) == 1
+    # if do_print:
+    #     print(f"----------------rm_f1_steps_plan_with_support_docs----------------")
+    #     print(f"Solution string: {solution_str}")
+    #     print(f"Golden answers: {ground_truth['target']}")
+    #     print(f"Extracted answer: {answer}")
+    #     print(f"Answer correct(f1): {answer_correct}")
+    #     print(f"Information gains: {information_gains}")
+    #     print(f"Redundancy penalty: {redundancy_penalty}")
+    #     print(f"Step scores: {step_scores}")
+    #     # print(f"Search key score: {search_key_score}")
 
     search_key_score = 0
     return {

@@ -245,7 +245,8 @@ class LLMGenerationManager:
             })         
             # Check if rollings_active is empty
             if len(rollings_active.batch['input_ids']) == 0:
-                print("Rollings_active is empty, breaking")
+                # 禁用调试打印，避免干扰进度条显示
+                # print("Rollings_active is empty, breaking")
                 break
 
             gen_output = self._generate_with_gpu_padding(rollings_active)
@@ -314,14 +315,17 @@ class LLMGenerationManager:
                 responses_ids,
             )
         else:
-            print("Rollings_active is empty, breaking")
+            # 禁用调试打印，避免干扰进度条显示
+            # print("Rollings_active is empty, breaking")
+            pass
         
         meta_info['turns_stats'] = turns_stats.tolist()
         meta_info['active_mask'] = active_mask.tolist()
         meta_info['valid_action_stats'] = valid_action_stats.tolist()
         meta_info['valid_search_stats'] = valid_search_stats.tolist()
         
-        print("ACTIVE_TRAJ_NUM:", active_num_list)
+        # 禁用调试打印，避免干扰进度条显示
+        # print("ACTIVE_TRAJ_NUM:", active_num_list)
         
         return self._compose_final_output(original_left_side, original_right_side, meta_info)
 
