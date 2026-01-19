@@ -394,6 +394,9 @@ class RayPPOTrainer(object):
 
         self._create_dataloader()
         self._init_logger()
+        
+        # 初始化最新的验证指标，用于checkpoint保存
+        self.latest_val_metrics = {}
     
     def _init_logger(self):
         from verl.utils.tracking import Tracking
@@ -768,9 +771,19 @@ class RayPPOTrainer(object):
         # 从配置中获取最大检查点数量，默认为4
         max_checkpoints = self.config.trainer.get('max_checkpoints_to_keep', 4)
         
+        # 获取当前步的验证指标（如果存在）
+        current_val_score = None
+        if hasattr(self, 'latest_val_metrics') and self.latest_val_metrics:
+            # 计算所有数据源的平均test_score作为总体评估分数
+            test_scores = [v for k, v in self.latest_val_metrics.items() if k.startswith('val/test_score/')]
+            if test_scores:
+                current_val_score = np.mean(test_scores)
+        
         # 检查并清理旧的检查点
         def manage_checkpoints(checkpoint_dir, checkpoint_pattern):
-            """在保存新检查点之前，清理旧检查点以保持数量不超过限制"""
+            """在保存新检查点之前，清理旧检查点以保持数量不超过限制
+            优先删除评估结果差的模型，保留评估结果好的模型
+            """
             if not os.path.exists(checkpoint_dir):
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 return
@@ -781,35 +794,58 @@ class RayPPOTrainer(object):
                 if os.path.isdir(ckpt)
             ]
             
-            # 如果保存新检查点后会超过限制，需要删除最旧的
-            # 例如：已有4个检查点，max_checkpoints=4，保存新检查点后会变成5个，需要删除1个
+            # 如果保存新检查点后会超过限制，需要删除评估结果差的
             if len(checkpoints) >= max_checkpoints:
-                # 提取步数并排序
-                checkpoint_steps = []
+                # 提取步数和评估结果
+                checkpoint_info = []
                 for ckpt in checkpoints:
                     try:
-                        # 从目录名中提取步数值，例如从 '/path/to/actor/global_step_100' 中提取 100
-                        # 使用 name 而不是 stem，因为这是目录路径
+                        # 从目录名中提取步数值
                         dir_name = os.path.basename(ckpt)  # 获取 'global_step_100'
                         step_str = dir_name.split('_')[-1]  # 提取 '100'
                         step = int(step_str)
-                        checkpoint_steps.append((step, ckpt))
+                        
+                        # 读取该checkpoint的评估结果
+                        metrics_file = os.path.join(ckpt, 'metrics.json')
+                        val_score = None
+                        if os.path.exists(metrics_file):
+                            try:
+                                with open(metrics_file, 'r') as f:
+                                    metrics = json.load(f)
+                                    # 计算所有数据源的平均test_score
+                                    test_scores = [v for k, v in metrics.items() if k.startswith('val/test_score/')]
+                                    if test_scores:
+                                        val_score = np.mean(test_scores)
+                            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                                # 如果无法读取评估结果，使用步数作为fallback（较旧的优先删除）
+                                pass
+                        
+                        # (step, val_score, checkpoint_path)
+                        # val_score为None表示没有评估结果，会被优先删除
+                        checkpoint_info.append((step, val_score, ckpt))
                     except (ValueError, IndexError) as e:
-                        # 如果无法解析步数，跳过这个检查点（可能是其他格式的目录）
+                        # 如果无法解析步数，跳过这个检查点
                         continue
                 
-                # 按步数升序排序
-                checkpoint_steps.sort(key=lambda x: x[0])
+                # 按评估结果排序：评估结果好的在前，评估结果差的在后
+                # 如果评估结果为None，放在最后（优先删除）
+                def sort_key(x):
+                    step, val_score, ckpt = x
+                    # 如果val_score为None，返回一个很小的值，确保排在最后
+                    return val_score if val_score is not None else -float('inf')
                 
-                # 计算需要删除的数量：如果已有N个检查点，保存后会变成N+1个
-                # 需要删除 (N+1) - max_checkpoints 个最旧的检查点
-                num_to_delete = len(checkpoint_steps) + 1 - max_checkpoints
+                checkpoint_info.sort(key=sort_key, reverse=True)  # 降序：好的在前
+                
+                # 计算需要删除的数量
+                num_to_delete = len(checkpoint_info) + 1 - max_checkpoints
                 if num_to_delete > 0:
+                    # 删除评估结果最差的（排在最后的）
                     for i in range(num_to_delete):
-                        oldest_checkpoint = checkpoint_steps[i][1]
-                        if os.path.exists(oldest_checkpoint):
-                            shutil.rmtree(oldest_checkpoint)
-                            print(f"Deleted oldest checkpoint: {oldest_checkpoint} (step {checkpoint_steps[i][0]})")
+                        step, val_score, checkpoint_to_delete = checkpoint_info[-(i+1)]  # 从后往前取
+                        if os.path.exists(checkpoint_to_delete):
+                            shutil.rmtree(checkpoint_to_delete)
+                            score_info = f"val_score: {val_score:.4f}" if val_score is not None else "no val_score"
+                            print(f"Deleted checkpoint: {checkpoint_to_delete} (step {step}, {score_info})")
 
         # 管理 actor 检查点（在保存之前清理）
         actor_checkpoint_dir = os.path.join(self.config.trainer.default_local_dir, 'actor')
@@ -819,6 +855,13 @@ class RayPPOTrainer(object):
         actor_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(
             self.config.trainer.default_hdfs_dir, 'actor')
         self.actor_rollout_wg.save_checkpoint(actor_local_path, actor_remote_path)
+        
+        # 保存当前checkpoint的评估结果
+        if current_val_score is not None and hasattr(self, 'latest_val_metrics'):
+            metrics_file = os.path.join(actor_local_path, 'metrics.json')
+            with open(metrics_file, 'w') as f:
+                json.dump(self.latest_val_metrics, f, indent=2)
+            print(f"Saved validation metrics to {metrics_file} (avg test_score: {current_val_score:.4f})")
 
         if self.use_critic:
             # 管理 critic 检查点（在保存之前清理）
@@ -873,6 +916,8 @@ class RayPPOTrainer(object):
         # currently, we only support validation using the reward_function.
         if self.val_reward_fn is not None and self.config.trainer.get('val_before_train', True):
             val_metrics = self._validate()
+            # 保存初始验证指标
+            self.latest_val_metrics = val_metrics
             pprint(f'Initial validation metrics: {val_metrics}')
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get('val_only', False):
@@ -1071,6 +1116,8 @@ class RayPPOTrainer(object):
                         self.global_steps % self.config.trainer.test_freq == 0:
                         with _timer('testing', timing_raw):
                             val_metrics: dict = self._validate()
+                            # 保存最新的验证指标，用于checkpoint保存时记录
+                            self.latest_val_metrics = val_metrics
                             # 使用 tqdm.write() 避免干扰进度条显示
                             pbar.write(f"Validation metrics: {val_metrics}")
                         metrics.update(val_metrics)
