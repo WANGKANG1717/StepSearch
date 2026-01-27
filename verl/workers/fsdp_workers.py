@@ -225,7 +225,7 @@ class ActorRolloutRefWorker(Worker):
 
         # TODO: add more optimizer args into config
         if self._is_actor:
-            from verl.utils.torch_functional import get_constant_schedule_with_warmup
+            from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
             actor_optimizer = optim.AdamW(actor_module_fsdp.parameters(),
                                           lr=optim_config.lr,
                                           betas=optim_config.get('betas', (0.9, 0.999)),
@@ -234,11 +234,23 @@ class ActorRolloutRefWorker(Worker):
             total_steps = optim_config.get('total_training_steps', 0)
             num_warmup_steps_ratio = optim_config.get('lr_warmup_steps_ratio', 0.)
             num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+            warmup_style = optim_config.get('warmup_style', 'constant')
+            min_lr_ratio = optim_config.get('min_lr_ratio', 0.0)
 
-            print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
+            print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}, warmup_style: {warmup_style}, min_lr_ratio: {min_lr_ratio}')
 
-            actor_lr_scheduler = get_constant_schedule_with_warmup(optimizer=actor_optimizer,
-                                                                   num_warmup_steps=num_warmup_steps)
+            if warmup_style == 'cosine':
+                actor_lr_scheduler = get_cosine_schedule_with_warmup(
+                    optimizer=actor_optimizer,
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=total_steps,
+                    min_lr_ratio=min_lr_ratio if min_lr_ratio is not None else 0.0
+                )
+            else:
+                actor_lr_scheduler = get_constant_schedule_with_warmup(
+                    optimizer=actor_optimizer,
+                    num_warmup_steps=num_warmup_steps
+                )
         else:
             actor_optimizer = None
             actor_lr_scheduler = None
@@ -670,12 +682,24 @@ class CriticWorker(Worker):
         total_steps = config.optim.get('total_training_steps', 0)
         num_warmup_steps_ratio = config.optim.get('lr_warmup_steps_ratio', 0.)
         num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+        warmup_style = config.optim.get('warmup_style', 'constant')
+        min_lr_ratio = config.optim.get('min_lr_ratio', 0.0)
 
-        print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}')
+        print(f'Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}, warmup_style: {warmup_style}, min_lr_ratio: {min_lr_ratio}')
 
-        from verl.utils.torch_functional import get_constant_schedule_with_warmup
-        critic_lr_scheduler = get_constant_schedule_with_warmup(optimizer=critic_optimizer,
-                                                                num_warmup_steps=num_warmup_steps)
+        from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
+        if warmup_style == 'cosine':
+            critic_lr_scheduler = get_cosine_schedule_with_warmup(
+                optimizer=critic_optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=total_steps,
+                min_lr_ratio=min_lr_ratio if min_lr_ratio is not None else 0.0
+            )
+        else:
+            critic_lr_scheduler = get_constant_schedule_with_warmup(
+                optimizer=critic_optimizer,
+                num_warmup_steps=num_warmup_steps
+            )
 
         return critic_module, critic_optimizer, critic_lr_scheduler
 

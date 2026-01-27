@@ -65,7 +65,12 @@ class Tracking(object):
     def log(self, data, step, backend=None):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
-                logger_instance.log(data=data, step=step)
+                if default_backend == 'wandb':
+                    # wandb.log需要commit=True来立即同步到服务器
+                    # 这样每次log都会立即提交，而不是等待后台进程同步
+                    logger_instance.log(data=data, step=step, commit=True)
+                else:
+                    logger_instance.log(data=data, step=step)
 
 
 class _MlflowLoggingAdapter:

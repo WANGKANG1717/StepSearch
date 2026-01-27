@@ -6,14 +6,14 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 export WAND_PROJECT='WK-search'
 # wandb 断点继续
-# export WANDB_RUN_ID='ebzm88mr'
+export WANDB_RUN_ID='joy7avfl'
 
 # export BASE_MODEL='Qwen/Qwen2.5-3B'
 # export BASE_MODEL='Qwen/Qwen2.5-3B'
 # export EXPERIMENT_NAME=nq-mysearch-grpo-qwen2.5-3b-em
 # export BASE_MODEL='Qwen/Qwen2.5-7B'
-export BASE_MODEL='/data1/wk/search-r1/verl-main/checkpoints/WK-VERL/sft-qwen2.5-7b-by-verl/sft_2000_merge'
-# export BASE_MODEL='/data1/wk/search-r1/StepSearch/verl_checkpoints/wk-search-grpo-qwen2.5-7b/actor/global_step_170'
+# export BASE_MODEL='/data1/wk/search-r1/verl-main/checkpoints/WK-VERL/sft-qwen2.5-7b-by-verl/sft_2000_merge'
+export BASE_MODEL='/data1/wk/search-r1/StepSearch/verl_checkpoints/wk-search-grpo-qwen2.5-7b/actor/global_step_990'
 export EXPERIMENT_NAME=wk-search-grpo-qwen2.5-7b
 
 # set -x
@@ -21,20 +21,25 @@ export VLLM_ATTENTION_BACKEND=XFORMERS # vllm + qwen2-7b with flash_attn has som
 
 ########     关键参数配置start      ##########
 export TRAIN_BATCH_SIZE=32
-export VAL_BATCH_SIZE=50
+export VAL_BATCH_SIZE=100
 export PPO_MINI_BATCH_SIZE=16
 export TENSOR_MODEL_PARALLEL_SIZE=2 # 将一个大模型分成几份，同时运行在多张显卡上，必须是显卡数量的约数
 export N_AGENT=4 # 每个问题，模型生成多少条路径
 export N_GPUS_PER_NODE=2 # 使用的显卡数量
 export SAVE_FREQ=10 # 保存频率
 export TEST_FREQ=10 # 测试频率 100条数据，VAL_BATCH_SIZE=20 大概15分钟
-export MAX_CKPT_TO_KEEP=4 # 最大checkpoint保存数量
-export LR_WARMUP_STEPS_RATIO=0.285 # 学习率预热比例 = total_training_steps * LR_WARMUP_STEPS_RATIO
+export MAX_CKPT_TO_KEEP=5 # 最大checkpoint保存数量
+export LR_WARMUP_STEPS_RATIO=0 # 学习率预热比例 = total_training_steps * LR_WARMUP_STEPS_RATIO
 export VAL_BEFORE_TRAIN=true # 训练前验证
 export SKIP_VALIDATION=false # 训练后验证
 export PARAM_OFFLOAD=true
-export LEARNING_RATE=5e-7
+export LEARNING_RATE=1e-7 # 学习率降低到之前的1/10
 export GPU_MEMORY_UTILIZATION=0.6
+export KL_LOSS_COEF=0.0001 # 降低KL损失系数 1/10
+export TOTAL_TRAINING_STEPS=1001 # 降低部署为1000步
+export TOTAL_EPOCHS=1
+export TEMPERATURE=1
+export WARMUP_STYLE=constant # cosine, constant
 ########     关键参数配置end      ##########
 
 # max_prompt_length = (config['training']['max_start_length'] + config['training']['max_response_length'] * (config['training']['max_turns'] - 1) + config['training']['max_obs_length'] * config['training']['max_turns'])
@@ -69,11 +74,13 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=$GPU_MEMORY_UTILIZATION \
     actor_rollout_ref.ref.log_prob_micro_batch_size=$PPO_MINI_BATCH_SIZE \
     actor_rollout_ref.ref.fsdp_config.param_offload=$PARAM_OFFLOAD \
-    actor_rollout_ref.actor.kl_loss_coef=0.0001 \
+    actor_rollout_ref.actor.kl_loss_coef=$KL_LOSS_COEF \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.optim.warmup_style=$WARMUP_STYLE \
+    actor_rollout_ref.actor.optim.min_lr_ratio=0 \
     algorithm.no_think_rl=false \
     actor_rollout_ref.rollout.n_agent=$N_AGENT \
-    actor_rollout_ref.rollout.temperature=1 \
+    actor_rollout_ref.rollout.temperature=$TEMPERATURE \
     actor_rollout_ref.actor.state_masking=true \
     trainer.logger=['wandb'] \
     +trainer.val_only=false \
@@ -86,8 +93,8 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     trainer.test_freq=$TEST_FREQ \
     trainer.project_name=$WAND_PROJECT \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.total_epochs=1 \
-    trainer.total_training_steps=1000 \
+    trainer.total_epochs=$TOTAL_EPOCHS \
+    trainer.total_training_steps=$TOTAL_TRAINING_STEPS \
     trainer.default_hdfs_dir=null \
     trainer.default_local_dir=verl_checkpoints/$EXPERIMENT_NAME \
     max_turns=5 \
